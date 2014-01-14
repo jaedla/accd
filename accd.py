@@ -61,19 +61,19 @@ class Coverage:
 class Accd:
   def parse_args(self):
     description        =  'Coverage tool based on ASAN coverage.'
-    distilled_help     = ('Directory where to store the distilled corpus. '
+    distilled_dir_help = ('Directory where to store the distilled corpus. '
                           'If it already exists, newly distilled testcases will be added.')
-    testcases_help     =  'Input directory for undistilled testcases.'
+    testcases_dir_help =  'Input directory for undistilled testcases.'
     command_help       = ('The rest of the command line will be executed as a command that '
                           'processes a testcase. Testcase name can be referenced by %%testcase.')
-    timeout_help       =  'Timeout in seconds, when the command will be killed.'
+    timeout_help       =  'Timeout in seconds for the command will be killed.'
     sancov_regexp_help = ('Regular expression that selects which of the generated .sancov files '
                           'should be used for coverage. %%pid matches the pid of command process. '
-                          '%%pid is useful if command executes child processes, whose .sancov files '
-                          'should be ignored.')
+                          '%%pid is useful if the command executes child processes, whose .sancov '
+                          'files should be ignored.')
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument('distilled', help=distilled_help)
-    parser.add_argument('testcases', help=testcases_help)
+    parser.add_argument('distilled_dir', help=distilled_dir_help)
+    parser.add_argument('testcases_dir', help=testcases_dir_help)
     parser.add_argument('command', help=command_help, nargs=argparse.REMAINDER)
     parser.add_argument('--timeout', dest='timeout', default=None, help=timeout_help)
     parser.add_argument('--sancov-regexp', dest='sancov_regexp', default='', help=sancov_regexp_help)
@@ -89,12 +89,12 @@ class Accd:
       os.makedirs(self.coverage_dir)
 
   def check_distilled_directory(self):
-    self.distilled_dir = self.args.distilled
+    self.distilled_dir = self.args.distilled_dir
     if not os.path.isdir(self.distilled_dir):
       raise AccdFailedException('Directory ' + self.distilled_dir + ' does not exist.')
     self.read_existing_coverage()
 
-  def process_testcase(self, testcase_path):
+  def get_testcase_coverage(self, testcase_path):
     command = [arg.replace('%%testcase', testcase_path) for arg in self.args.command]
     work_dir = tempfile.mkdtemp()
     devnull = open(os.devnull, "rwb")
@@ -110,16 +110,18 @@ class Accd:
     shutil.rmtree(work_dir)
     return testcase_coverage
 
+  def process_testcase(self, testcase_path):
+    testcase_coverage = self.get_testcase_coverage(testcase_path)
+    if self.total_coverage.merge(testcase_coverage):
+      testcase_save_path = os.path.join(self.distilled_dir, filename)
+      shutil.copyfile(testcase_path, testcase_save_path)
+
   def process_testcases(self):
-    testcases_dir = self.args.testcases
+    testcases_dir = self.args.testcases_dir
     if not os.path.isdir(testcases_dir):
       raise AccdFailedException('Directory ' + testcases_dir + ' does not exist.')
     for filename in os.listdir(testcases_dir):
-      testcase_path = os.path.join(testcases_dir, filename)
-      testcase_coverage = self.process_testcase(testcase_path)
-      if self.total_coverage.merge(testcase_coverage)
-        testcase_save_path = os.path.join(self.distilled_dir, filename)
-        shutil.copyfile(testcase_path, testcase_save_path)
+      self.process_testcase(os.path.join(testcases_dir, filename))
 
   def main(self):
     self.args = self.parse_args()
@@ -128,6 +130,7 @@ class Accd:
       return 1
     self.check_distilled_directory()
     self.process_testcases()
+    return 0
 
 if __name__ == '__main__':
   accd = Accd()
