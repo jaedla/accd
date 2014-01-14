@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 
 import argparse
+import array
 import copy
 import imp
 import os
-import pprint
+import re
 import sys
 
 class AccdFailedException(Exception):
@@ -18,15 +19,27 @@ class ModuleCoverage:
       raise AccdFailedException('Bad sancov filename at ' + sancov_path)
     self.module = name_components[0]
     self.pid = int(name_components[1]) if num_components == 3 else -1
-    self.offsets = sancov.ReadOneFile(sancov_path)
+    self.read_sancov(sancov_path)
+
+  def read_sancov(self, sancov_path):
+    f = open(sancov_path, mode="rb")
+    size = os.fstat(f.fileno()).st_size
+    self.offsets = set(array.array('I', f.read(size)))
+    f.close()
 
   def merge(self, other):
     self.offsets |= other.offsets
 
 class Coverage:
-  def __init__(self):
+  def __init__(self, directory='', filename_regex=''):
     self.modules = {}
-
+    if directory:
+      regex = re.compile(filename_regex)
+      for filename in os.listdir(directory):
+        if regex.match(filename):
+          sancov_path = os.path.join(directory, filename)
+          self.merge_sancov_file(sancov_path)
+      
   def merge_sancov_file(self, sancov_path):
     module = ModuleCoverage(sancov_path)
     self.merge_module(module)
@@ -53,34 +66,18 @@ class Accd:
     self.parser = parser
     return parser.parse_args()
 
-  def import_sancov(self):
-    sancov_key = 'LLVM_PATH'
-    if not sancov_key in os.environ:
-      print 'Point LLVM_PATH environment variable to llvm source tree (necessary for sancov.py).'
-      return False
-    llvm_path = os.environ[sancov_key]
-    sancov_module_path = os.path.join(llvm_path, 'projects', 'compiler-rt', 'lib', 'sanitizer_common',
-                               'scripts', 'sancov.py')
-    try:
-      imp.load_source('sancov', sancov_module_path)
-    except IOError:
-      raise AccdFailedException('Failed to load ' + sancov_module_path)
-    import sancov
-
   def read_existing_coverage(self):
     self.coverage_dir = os.path.join(self.distilled_dir, 'coverage')
     if os.path.isdir(self.coverage_dir):
-      for filename in os.listdir(self.coverage_dir):
-        sancov_path = os.path.join(self.coverage_dir, filename)
-        self.total_coverage.merge_sancov_file(sancov_path)
+      self.total_coverage = Coverage(self.coverage_dir)
     else:
+      self.total_coverage = Coverage()
       os.makedirs(self.coverage_dir)
 
   def check_distilled_directory(self):
     self.distilled_dir = self.args.distilled
     if not os.path.isdir(self.distilled_dir):
       raise AccdFailedException('Directory ' + self.distilled_dir + ' does not exist')
-    self.total_coverage = Coverage()
     self.read_existing_coverage()
 
   def main(self):
@@ -88,9 +85,7 @@ class Accd:
     if not self.args.command:
       self.parser.print_help()
       return 1
-    self.import_sancov()
     self.check_distilled_directory()
-    pprint.pprint(vars(self.total_coverage))
 
 if __name__ == '__main__':
   accd = Accd()
