@@ -6,6 +6,7 @@ import copy
 import imp
 import os
 import re
+import psutil
 import shutil
 import subprocess
 import sys
@@ -34,10 +35,10 @@ class ModuleCoverage:
     self.offsets |= other.offsets
 
 class Coverage:
-  def __init__(self, directory='', filename_regex=''):
+  def __init__(self, directory='', sancov_regex=''):
     self.modules = {}
     if directory:
-      regex = re.compile(filename_regex)
+      regex = re.compile(sancov_regex)
       for filename in os.listdir(directory):
         if regex.match(filename):
           sancov_path = os.path.join(directory, filename)
@@ -54,20 +55,28 @@ class Coverage:
     else:
       self.modules[module_name] = copy.deepcopy(module)
 
+  def merge(self, other):
+    pass
+
 class Accd:
   def parse_args(self):
-    description      =  'Coverage tool based on ASAN coverage.'
-    distilled_help   = ('Directory where to store the distilled corpus. '
-                        'If it already exists, newly distilled testcases will be added.')
-    testcases_help   =  'Input directory for undistilled testcases.'
-    command_help     = ('The rest of the command line will be executed as a command that '
-                        'processes a testcase. Testcase name can be referenced by %%testcase')
-    timeout_help     =  'Timeout in seconds, when the command will be killed'
+    description        =  'Coverage tool based on ASAN coverage.'
+    distilled_help     = ('Directory where to store the distilled corpus. '
+                          'If it already exists, newly distilled testcases will be added.')
+    testcases_help     =  'Input directory for undistilled testcases.'
+    command_help       = ('The rest of the command line will be executed as a command that '
+                          'processes a testcase. Testcase name can be referenced by %%testcase.')
+    timeout_help       =  'Timeout in seconds, when the command will be killed.'
+    sancov_regexp_help = ('Regular expression that selects which of the generated .sancov files '
+                          'should be used for coverage. %%pid matches the pid of command process. '
+                          '%%pid is useful if command executes child processes, whose .sancov files '
+                          'should be ignored.')
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument('distilled', help=distilled_help)
     parser.add_argument('testcases', help=testcases_help)
     parser.add_argument('command', help=command_help, nargs=argparse.REMAINDER)
-    parser.add_argument('--timeout', dest='timeout', help=timeout_help)
+    parser.add_argument('--timeout', dest='timeout', default=None, help=timeout_help)
+    parser.add_argument('--sancov-regexp', dest='sancov_regexp', default='', help=sancov_regexp_help)
     self.parser = parser
     return parser.parse_args()
 
@@ -87,10 +96,19 @@ class Accd:
 
   def process_testcase(self, testcase_path):
     command = [arg.replace('%%testcase', testcase_path) for arg in self.args.command]
-    cwd = os.getcwd()
     work_dir = tempfile.mkdtemp()
-    
+    devnull = open(os.devnull, "rwb")
+    process = psutil.Popen(command, stdin=devnull, stdout=devnull, stderr=devnull, cwd=work_dir);
+    testcase_coverage = None
+    try:
+      pid = process.pid
+      process.wait(self.args.timeout)
+      sancov_regex = self.args.sancov_regex.replace('%%pid', str(pid))
+      testcase_coverage = Coverage(work_dir, sancov_regex)
+    except TimeoutExpired:
+      process.kill()
     shutil.rmtree(work_dir)
+    return testcase_coverage
 
   def process_testcases(self):
     testcases_dir = self.args.testcases
@@ -98,7 +116,10 @@ class Accd:
       raise AccdFailedException('Directory ' + testcases_dir + ' does not exist.')
     for filename in os.listdir(testcases_dir):
       testcase_path = os.path.join(testcases_dir, filename)
-      self.process_testcase(testcase_path)
+      testcase_coverage = self.process_testcase(testcase_path)
+      if self.total_coverage.merge(testcase_coverage)
+        testcase_save_path = os.path.join(self.distilled_dir, filename)
+        shutil.copyfile(testcase_path, testcase_save_path)
 
   def main(self):
     self.args = self.parse_args()
