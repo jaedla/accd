@@ -86,7 +86,7 @@ class Accd:
     command_help       = ('The rest of the command line will be executed as a command that '
                           'processes a testcase. Testcase name can be referenced by %%testcase.')
     timeout_help       =  'Timeout in seconds for the command will be killed.'
-    sancov_regexp_help = ('Regular expression that selects which of the generated .sancov files '
+    sancov_regex_help = ('Regular expression that selects which of the generated .sancov files '
                           'should be used for coverage. %%pid matches the pid of command process. '
                           '%%pid is useful if the command executes child processes, whose .sancov '
                           'files should be ignored.')
@@ -95,7 +95,7 @@ class Accd:
     parser.add_argument('testcases_dir', help=testcases_dir_help)
     parser.add_argument('command', help=command_help, nargs=argparse.REMAINDER)
     parser.add_argument('--timeout', dest='timeout', default=None, help=timeout_help)
-    parser.add_argument('--sancov-regexp', dest='sancov_regexp', default='', help=sancov_regexp_help)
+    parser.add_argument('--sancov-regex', dest='sancov_regex', default='', help=sancov_regex_help)
     self.parser = parser
     return parser.parse_args()
 
@@ -120,7 +120,7 @@ class Accd:
       process.wait(self.args.timeout)
       sancov_regex = self.args.sancov_regex.replace('%%pid', str(pid))
       testcase_coverage = Coverage(work_dir, sancov_regex)
-    except TimeoutExpired:
+    except psutil.TimeoutExpired:
       process.kill()
     shutil.rmtree(work_dir)
     return testcase_coverage
