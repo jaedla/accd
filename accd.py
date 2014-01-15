@@ -32,7 +32,9 @@ class ModuleCoverage:
     f.close()
 
   def merge(self, other):
+    got_new_coverage = not other.offsets <= self.offsets
     self.offsets |= other.offsets
+    return got_new_coverage
 
 class Coverage:
   def __init__(self, directory='', sancov_regex=''):
@@ -46,17 +48,21 @@ class Coverage:
       
   def merge_sancov_file(self, sancov_path):
     module = ModuleCoverage(sancov_path)
-    self.merge_module(module)
+    return self.merge_module(module)
 
   def merge_module(self, module):
     module_name = module.module
     if module_name in self.modules:
-      self.modules[module_name].merge(module)
+      return self.modules[module_name].merge(module)
     else:
       self.modules[module_name] = copy.deepcopy(module)
+      return len(module.offsets) != 0
 
   def merge(self, other):
-    pass
+    got_new_coverage = False
+    for module in self.modules.values():
+      got_new_coverage |= self.merge_module(module)
+    return got_new_coverage
 
 class Accd:
   def parse_args(self):
