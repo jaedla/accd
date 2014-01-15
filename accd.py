@@ -25,16 +25,25 @@ class ModuleCoverage:
     self.pid = int(name_components[1]) if num_components == 3 else -1
     self.read_sancov(sancov_path)
 
+  def merge(self, other):
+    got_new_coverage = not other.offsets <= self.offsets
+    self.offsets |= other.offsets
+    return got_new_coverage
+
+  def save(self, directory):
+    sancov_path = os.path.join(directory, self.module + '.sancov')
+    self.write_sancov(sancov_path)
+
   def read_sancov(self, sancov_path):
     f = open(sancov_path, mode="rb")
     size = os.fstat(f.fileno()).st_size
     self.offsets = set(array.array('I', f.read(size)))
     f.close()
 
-  def merge(self, other):
-    got_new_coverage = not other.offsets <= self.offsets
-    self.offsets |= other.offsets
-    return got_new_coverage
+  def write_sancov(self, sancov_path):
+    f = open(sancov_path, mode="w+b")
+    array.array('I', self.offsets).tofile(f)
+    f.close()
 
 class Coverage:
   def __init__(self, directory='', sancov_regex=''):
@@ -60,9 +69,13 @@ class Coverage:
 
   def merge(self, other):
     got_new_coverage = False
-    for module in self.modules.values():
+    for module in other.modules.values():
       got_new_coverage |= self.merge_module(module)
     return got_new_coverage
+
+  def save(self, directory):
+    for module in self.modules.values():
+      module.save(directory)
 
 class Accd:
   def parse_args(self):
@@ -86,19 +99,15 @@ class Accd:
     self.parser = parser
     return parser.parse_args()
 
-  def read_existing_coverage(self):
+  def read_total_coverage(self):
+    self.distilled_dir = self.args.distilled_dir
     self.coverage_dir = os.path.join(self.distilled_dir, 'coverage')
+    if not os.path.isdir(self.distilled_dir):
+      os.mkdir(self.distilled_dir)
     if os.path.isdir(self.coverage_dir):
       self.total_coverage = Coverage(self.coverage_dir)
     else:
       self.total_coverage = Coverage()
-      os.makedirs(self.coverage_dir)
-
-  def check_distilled_directory(self):
-    self.distilled_dir = self.args.distilled_dir
-    if not os.path.isdir(self.distilled_dir):
-      raise AccdFailedException('Directory ' + self.distilled_dir + ' does not exist.')
-    self.read_existing_coverage()
 
   def get_testcase_coverage(self, testcase_path):
     command = [arg.replace('%%testcase', testcase_path) for arg in self.args.command]
@@ -129,13 +138,20 @@ class Accd:
     for filename in os.listdir(testcases_dir):
       self.process_testcase(os.path.join(testcases_dir, filename))
 
+  def save_total_coverage(self):
+    if os.path.isdir(self.coverage_dir):
+      shutil.rmtree(self.coverage_dir)
+    os.mkdir(self.coverage_dir)
+    self.total_coverage.save(self.coverage_dir)
+
   def main(self):
     self.args = self.parse_args()
     if not self.args.command:
       self.parser.print_help()
       return 1
-    self.check_distilled_directory()
+    self.read_total_coverage()
     self.process_testcases()
+    self.save_total_coverage()
     return 0
 
 if __name__ == '__main__':
