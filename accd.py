@@ -88,24 +88,30 @@ class Accd:
                           'If it already exists, newly distilled testcases will be added.')
     testcases_dir_help =  'Input directory with undistilled testcases.'
     command_help       = ('The rest of the command line will be executed as a command that '
-                          'processes a testcase. Testcase name can be referenced by %testcase.')
+                          'processes a testcase. The following can be referenced: '
+                          '%%testcase - full path of a testcase, '
+                          '%%work_dir - temporary working directory of the command. ')
     timeout_help       =  'Timeout in seconds for the command will be killed.'
     sancov_regex_help  = ('Regular expression that selects which of the generated .sancov files '
-                          'should be used for coverage. %pid matches the pid of command process. '
+                          'should be used for coverage. %%pid matches the pid of command process. '
                           '%%pid is useful if the command executes child processes, whose .sancov '
                           'files should be ignored.')
     print_new_coverage_help = 'Print out function names of new coverage.'
-    num_jobs_help      = ('Number of concurrent jobs that run testcases. By default this will be '
+    num_jobs_help      = ('Number of concurrent jobs that run testcases. The default is '
                           'psutil.NUM_CPUS.')
+    hide_gui_help      =  'Redirect GUI to fake X server. Requires xvfb and icewm to be installed.
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument('corpus_dir', help=corpus_dir_help)
     parser.add_argument('testcases_dir', help=testcases_dir_help)
     parser.add_argument('command', help=command_help, nargs=argparse.REMAINDER)
     parser.add_argument('--timeout', dest='timeout', default=None, help=timeout_help)
-    parser.add_argument('--sancov-regex', dest='sancov_regex', default='', help=sancov_regex_help)
-    parser.add_argument('--print-new-coverage', dest='print_new_coverage', default='',
-                        help=print_new_coverage_help)
+    parser.add_argument('--sancov-regex', dest='sancov_regex', default='.*\.sancov',
+                        help=sancov_regex_help)
+    parser.add_argument('--print-new-coverage', dest='print_new_coverage', default=False,
+                        action='store_true', help=print_new_coverage_help)
     parser.add_argument('--num-jobs', dest='num_jobs', default=psutil.NUM_CPUS, help=num_jobs_help)
+    parser.add_argument('--hide-gui', dest='hide_gui', default=False, action='store_true',
+                        help=hide_gui_help)
     self.parser = parser
     return parser.parse_args()
 
@@ -148,8 +154,12 @@ class Accd:
     psutil.Process(pgid).wait()
 
   def get_testcase_coverage(self, testcase_path):
-    command = [arg.replace('%testcase', testcase_path) for arg in self.args.command]
     work_dir = tempfile.mkdtemp()
+    command = []
+    for arg in self.args.command:
+      arg = arg.replace('%testcase', testcase_path)
+      arg = arg.replace('%work_dir', work_dir)
+      command.append(arg)
     devnull = open(os.devnull, "rwb")
     process = psutil.Popen(command, cwd=work_dir, preexec_fn=os.setpgrp,
                            stdin=devnull, stdout=devnull, stderr=devnull);
@@ -159,14 +169,17 @@ class Accd:
     shutil.rmtree(work_dir)
     return testcase_coverage
 
-  def testcase_processor(self):
+  def testcase_processor(self, thread_id):
     while True:
       with self.testcases_lock:
         if not self.testcases:
           return
         filename = self.testcases.pop()
+        self.testcase_index += 1
+        testcase_index = self.testcase_index
       with self.print_lock:
-        print 'Processing ' + filename
+        print ('[%d/%d] Processing %s by thread %d' %
+               (testcase_index, self.testcase_count, filename, thread_id))
       testcase_path = os.path.join(self.testcases_dir, filename)
       testcase_coverage = self.get_testcase_coverage(testcase_path)
       with self.coverage_lock:
@@ -181,16 +194,17 @@ class Accd:
       raise AccdFailedException('Directory ' + testcases_dir + ' does not exist.')
     self.testcases_dir = os.path.abspath(testcases_dir)
     self.testcases = os.listdir(self.testcases_dir)
+    self.testcase_count = len(self.testcases)
+    self.testcase_index = 0
     self.testcases_lock = threading.Lock()
     self.coverage_lock = threading.Lock()
     self.print_lock = threading.Lock()
-    threads = []
-    for i in xrange(self.args.num_jobs):
-      thread = threading.Thread(target=self.testcase_processor)
+    for i in xrange(int(self.args.num_jobs)):
+      thread = threading.Thread(target=self.testcase_processor, args=(i, ))
+      thread.setDaemon(True)
       thread.start()
-      threads.append(thread)
-    for thread in threads:
-      thread.join()
+    while threading.active_count() != 1:
+      time.sleep(0.1)
 
   def save_total_coverage(self):
     if os.path.isdir(self.coverage_dir):
