@@ -140,6 +140,12 @@ class Accd:
       self.run_program_if_not_running(['Xvfb', ':10.0'])
       self.run_program_if_not_running(['icewm'])
 
+  def enable_coverage_dump(self):
+    asan_options = os.environ.get('ASAN_OPTIONS', '')
+    if asan_options:
+      asan_options += ':'
+    os.environ['ASAN_OPTIONS'] = asan_options + 'coverage=1'
+
   def read_total_coverage(self):
     self.corpus_dir = self.args.corpus_dir
     self.coverage_dir = os.path.join(self.corpus_dir, 'coverage')
@@ -240,6 +246,7 @@ class Accd:
       self.parser.print_help()
       return 1
     self.bring_up_fake_x()
+    self.enable_coverage_dump()
     self.read_total_coverage()
     self.process_testcases()
     self.save_total_coverage()
