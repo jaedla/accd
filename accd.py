@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 class AccdFailedException(Exception):
@@ -94,6 +95,8 @@ class Accd:
                           '%%pid is useful if the command executes child processes, whose .sancov '
                           'files should be ignored.')
     print_new_coverage_help = 'Print out function names of new coverage.'
+    num_jobs_help      = ('Number of concurrent jobs that run testcases. By default this will be '
+                          'psutil.NUM_CPUS.')
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument('corpus_dir', help=corpus_dir_help)
     parser.add_argument('testcases_dir', help=testcases_dir_help)
@@ -102,6 +105,7 @@ class Accd:
     parser.add_argument('--sancov-regex', dest='sancov_regex', default='', help=sancov_regex_help)
     parser.add_argument('--print-new-coverage', dest='print_new_coverage', default='',
                         help=print_new_coverage_help)
+    parser.add_argument('--num-jobs', dest='num_jobs', default=psutil.NUM_CPUS, help=num_jobs_help)
     self.parser = parser
     return parser.parse_args()
 
@@ -134,37 +138,19 @@ class Accd:
   def process_is_zombie(self, process):
     return process.status == psutil.STATUS_ZOMBIE
 
-  def process_group_is_dead(self, pgid):
-    for process in psutil.process_iter():
-      try:
-        if os.getpgid(process.pid) == pgid and not self.process_is_zombie(process):
-          return False
-      except OSError:
-        pass
-    return True
-
-  def wait_process(self, pid, timeout):
-    process = psutil.Process(pid)
-    process_is_dead = functools.partial(self.process_is_zombie, process)
-    self.busy_wait(timeout, process_is_dead)
-
-  def kill_process_group(self, pgid):
-    process_group_is_dead = functools.partial(self.process_group_is_dead, pgid)
-    os.killpg(pgid, signal.SIGTERM)
-    if self.busy_wait(3, process_group_is_dead):
-      os.killpg(pgid, signal.SIGKILL)
-      self.busy_wait(None, process_group_is_dead)
-
   def wait_process_group(self, pgid, timeout):
-    self.wait_process(pgid, timeout)
-    self.kill_process_group(pgid)
+    process = psutil.Process(pgid)
+    process_is_dead = functools.partial(self.process_is_zombie, process)
+    if self.busy_wait(timeout, process_is_dead):
+      os.killpg(pgid, signal.SIGTERM)
+      time.sleep(3)
+    os.killpg(pgid, signal.SIGKILL)
     psutil.Process(pgid).wait()
 
   def get_testcase_coverage(self, testcase_path):
     command = [arg.replace('%testcase', testcase_path) for arg in self.args.command]
     work_dir = tempfile.mkdtemp()
     devnull = open(os.devnull, "rwb")
-    print 'Executing ' + str(command)
     process = psutil.Popen(command, cwd=work_dir, preexec_fn=os.setpgrp,
                            stdin=devnull, stdout=devnull, stderr=devnull);
     self.wait_process_group(process.pid, float(self.args.timeout))
@@ -173,20 +159,38 @@ class Accd:
     shutil.rmtree(work_dir)
     return testcase_coverage
 
-  def process_testcase(self, testcase_path):
-    testcase_coverage = self.get_testcase_coverage(testcase_path)
-    if self.total_coverage.merge(testcase_coverage):
-      filename = os.path.basename(testcase_path)
-      testcase_save_path = os.path.join(self.corpus_dir, filename)
-      shutil.copyfile(testcase_path, testcase_save_path)
+  def testcase_processor(self):
+    while True:
+      with self.testcases_lock:
+        if not self.testcases:
+          return
+        filename = self.testcases.pop()
+      with self.print_lock:
+        print 'Processing ' + filename
+      testcase_path = os.path.join(self.testcases_dir, filename)
+      testcase_coverage = self.get_testcase_coverage(testcase_path)
+      with self.coverage_lock:
+        got_new_coverage = self.total_coverage.merge(testcase_coverage)
+      if got_new_coverage:
+        testcase_save_path = os.path.join(self.corpus_dir, filename)
+        shutil.copyfile(testcase_path, testcase_save_path)
 
   def process_testcases(self):
     testcases_dir = self.args.testcases_dir
     if not os.path.isdir(testcases_dir):
       raise AccdFailedException('Directory ' + testcases_dir + ' does not exist.')
-    testcases_dir = os.path.abspath(testcases_dir)
-    for filename in os.listdir(testcases_dir):
-      self.process_testcase(os.path.join(testcases_dir, filename))
+    self.testcases_dir = os.path.abspath(testcases_dir)
+    self.testcases = os.listdir(self.testcases_dir)
+    self.testcases_lock = threading.Lock()
+    self.coverage_lock = threading.Lock()
+    self.print_lock = threading.Lock()
+    threads = []
+    for i in xrange(self.args.num_jobs):
+      thread = threading.Thread(target=self.testcase_processor)
+      thread.start()
+      threads.append(thread)
+    for thread in threads:
+      thread.join()
 
   def save_total_coverage(self):
     if os.path.isdir(self.coverage_dir):
@@ -194,7 +198,7 @@ class Accd:
     os.mkdir(self.coverage_dir)
     self.total_coverage.save(self.coverage_dir)
 
-  def main(self):
+  def run(self):
     self.args = self.parse_args()
     if not self.args.command:
       self.parser.print_help()
@@ -206,4 +210,4 @@ class Accd:
 
 if __name__ == '__main__':
   accd = Accd()
-  sys.exit(accd.main())
+  sys.exit(accd.run())
