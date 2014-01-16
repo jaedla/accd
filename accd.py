@@ -169,14 +169,13 @@ class Accd:
   def process_is_zombie(self, process):
     return process.status == psutil.STATUS_ZOMBIE
 
-  def wait_process_group(self, pgid, timeout):
-    process = psutil.Process(pgid)
-    process_is_dead = functools.partial(self.process_is_zombie, process)
-    if self.busy_wait(timeout, process_is_dead):
-      os.killpg(pgid, signal.SIGTERM)
+  def wait_process_group(self, leader, timeout):
+    leader_is_dead = functools.partial(self.process_is_zombie, leader)
+    if self.busy_wait(timeout, leader_is_dead):
+      os.killpg(leader.pid, signal.SIGTERM)
       time.sleep(3)
-    os.killpg(pgid, signal.SIGKILL)
-    psutil.Process(pgid).wait()
+    os.killpg(leader.pid, signal.SIGKILL)
+    leader.wait()
 
   def get_testcase_coverage(self, testcase_path):
     work_dir = tempfile.mkdtemp()
@@ -185,9 +184,9 @@ class Accd:
       arg = arg.replace('%testcase', testcase_path)
       arg = arg.replace('%work_dir', work_dir)
       command.append(arg)
-    program = self.run_program(command, work_dir, os.setpgrp)
-    self.wait_process_group(program.pid, float(self.args.timeout))
-    sancov_regex = self.args.sancov_regex.replace('%pid', str(program.pid))
+    process = self.run_program(command, work_dir, os.setpgrp)
+    self.wait_process_group(process, float(self.args.timeout))
+    sancov_regex = self.args.sancov_regex.replace('%pid', str(process.pid))
     testcase_coverage = Coverage(work_dir, sancov_regex)
     shutil.rmtree(work_dir)
     return testcase_coverage
