@@ -82,6 +82,9 @@ class Coverage:
       module.save(directory)
 
 class Accd:
+  def __init__(self):
+    self.devnull = open(os.devnull, "rwb")
+
   def parse_args(self):
     description        =  'Coverage tool based on ASAN coverage.'
     corpus_dir_help    = ('Directory where to store the distilled corpus. '
@@ -99,7 +102,7 @@ class Accd:
     print_new_coverage_help = 'Print out function names of new coverage.'
     num_jobs_help      = ('Number of concurrent jobs that run testcases. The default is '
                           'psutil.NUM_CPUS.')
-    hide_gui_help      =  'Redirect GUI to fake X server. Requires xvfb and icewm to be installed.
+    hide_gui_help      =  'Redirect GUI to fake X server. Requires xvfb and icewm to be installed.'
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument('corpus_dir', help=corpus_dir_help)
     parser.add_argument('testcases_dir', help=testcases_dir_help)
@@ -114,6 +117,28 @@ class Accd:
                         help=hide_gui_help)
     self.parser = parser
     return parser.parse_args()
+
+  def program_is_running(self, program):
+    for process in psutil.process_iter():
+      if process.name == program:
+        return True
+    return False
+
+  def run_program(self, command, cwd=None, preexec_fn=None):
+    devnull = self.devnull
+    process = psutil.Popen(command, cwd=cwd, preexec_fn=preexec_fn,
+                           stdin=devnull, stdout=devnull, stderr=devnull);
+    return process
+
+  def run_program_if_not_running(self, program):
+    if not self.program_is_running(program[0]):
+      self.run_program(program)
+
+  def bring_up_fake_x(self):
+    if self.args.hide_gui:
+      os.environ['DISPLAY'] = ':10.0'
+      self.run_program_if_not_running(['Xvfb', ':10.0'])
+      self.run_program_if_not_running(['icewm'])
 
   def read_total_coverage(self):
     self.corpus_dir = self.args.corpus_dir
@@ -160,16 +185,14 @@ class Accd:
       arg = arg.replace('%testcase', testcase_path)
       arg = arg.replace('%work_dir', work_dir)
       command.append(arg)
-    devnull = open(os.devnull, "rwb")
-    process = psutil.Popen(command, cwd=work_dir, preexec_fn=os.setpgrp,
-                           stdin=devnull, stdout=devnull, stderr=devnull);
-    self.wait_process_group(process.pid, float(self.args.timeout))
-    sancov_regex = self.args.sancov_regex.replace('%pid', str(process.pid))
+    program = self.run_program(command, work_dir, os.setpgrp)
+    self.wait_process_group(program.pid, float(self.args.timeout))
+    sancov_regex = self.args.sancov_regex.replace('%pid', str(program.pid))
     testcase_coverage = Coverage(work_dir, sancov_regex)
     shutil.rmtree(work_dir)
     return testcase_coverage
 
-  def testcase_processor(self, thread_id):
+  def testcase_processor_thread(self, thread_id):
     while True:
       with self.testcases_lock:
         if not self.testcases:
@@ -200,7 +223,7 @@ class Accd:
     self.coverage_lock = threading.Lock()
     self.print_lock = threading.Lock()
     for i in xrange(int(self.args.num_jobs)):
-      thread = threading.Thread(target=self.testcase_processor, args=(i, ))
+      thread = threading.Thread(target=self.testcase_processor_thread, args=(i, ))
       thread.setDaemon(True)
       thread.start()
     while threading.active_count() != 1:
@@ -217,6 +240,7 @@ class Accd:
     if not self.args.command:
       self.parser.print_help()
       return 1
+    self.bring_up_fake_x()
     self.read_total_coverage()
     self.process_testcases()
     self.save_total_coverage()
