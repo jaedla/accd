@@ -3,14 +3,17 @@
 import argparse
 import array
 import copy
+import functools
 import imp
 import os
 import re
 import psutil
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 class AccdFailedException(Exception):
   pass
@@ -82,20 +85,23 @@ class Accd:
     description        =  'Coverage tool based on ASAN coverage.'
     corpus_dir_help    = ('Directory where to store the distilled corpus. '
                           'If it already exists, newly distilled testcases will be added.')
-    testcases_dir_help =  'Input directory for undistilled testcases.'
+    testcases_dir_help =  'Input directory with undistilled testcases.'
     command_help       = ('The rest of the command line will be executed as a command that '
-                          'processes a testcase. Testcase name can be referenced by %%testcase.')
+                          'processes a testcase. Testcase name can be referenced by %testcase.')
     timeout_help       =  'Timeout in seconds for the command will be killed.'
-    sancov_regex_help = ('Regular expression that selects which of the generated .sancov files '
-                          'should be used for coverage. %%pid matches the pid of command process. '
+    sancov_regex_help  = ('Regular expression that selects which of the generated .sancov files '
+                          'should be used for coverage. %pid matches the pid of command process. '
                           '%%pid is useful if the command executes child processes, whose .sancov '
                           'files should be ignored.')
+    print_new_coverage_help = 'Print out function names of new coverage.'
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument('corpus_dir', help=corpus_dir_help)
     parser.add_argument('testcases_dir', help=testcases_dir_help)
     parser.add_argument('command', help=command_help, nargs=argparse.REMAINDER)
     parser.add_argument('--timeout', dest='timeout', default=None, help=timeout_help)
     parser.add_argument('--sancov-regex', dest='sancov_regex', default='', help=sancov_regex_help)
+    parser.add_argument('--print-new-coverage', dest='print_new_coverage', default='',
+                        help=print_new_coverage_help)
     self.parser = parser
     return parser.parse_args()
 
@@ -109,25 +115,68 @@ class Accd:
     else:
       self.total_coverage = Coverage()
 
+  def busy_wait(self, timeout, finished):
+    have_timeout = timeout is not None
+    if have_timeout:
+      endtime = time.time() + timeout
+    delay = 0.0005
+    while True:
+      if finished():
+        return False
+      delay = min(delay * 2, .05)
+      if have_timeout:
+        remaining = endtime - time.time()
+        if remaining <= 0:
+          return True
+        delay = min(delay, remaining)
+      time.sleep(delay)
+
+  def process_is_zombie(self, process):
+    return process.status == psutil.STATUS_ZOMBIE
+
+  def process_group_is_dead(self, pgid):
+    for process in psutil.process_iter():
+      try:
+        if os.getpgid(process.pid) == pgid and not self.process_is_zombie(process):
+          return False
+      except OSError:
+        pass
+    return True
+
+  def wait_process(self, pid, timeout):
+    process = psutil.Process(pid)
+    process_is_dead = functools.partial(self.process_is_zombie, process)
+    self.busy_wait(timeout, process_is_dead)
+
+  def kill_process_group(self, pgid):
+    process_group_is_dead = functools.partial(self.process_group_is_dead, pgid)
+    os.killpg(pgid, signal.SIGTERM)
+    if self.busy_wait(3, process_group_is_dead):
+      os.killpg(pgid, signal.SIGKILL)
+      self.busy_wait(None, process_group_is_dead)
+
+  def wait_process_group(self, pgid, timeout):
+    self.wait_process(pgid, timeout)
+    self.kill_process_group(pgid)
+    psutil.Process(pgid).wait()
+
   def get_testcase_coverage(self, testcase_path):
-    command = [arg.replace('%%testcase', testcase_path) for arg in self.args.command]
+    command = [arg.replace('%testcase', testcase_path) for arg in self.args.command]
     work_dir = tempfile.mkdtemp()
     devnull = open(os.devnull, "rwb")
-    process = psutil.Popen(command, stdin=devnull, stdout=devnull, stderr=devnull, cwd=work_dir);
-    testcase_coverage = None
-    try:
-      pid = process.pid
-      process.wait(self.args.timeout)
-      sancov_regex = self.args.sancov_regex.replace('%%pid', str(pid))
-      testcase_coverage = Coverage(work_dir, sancov_regex)
-    except psutil.TimeoutExpired:
-      process.kill()
+    print 'Executing ' + str(command)
+    process = psutil.Popen(command, cwd=work_dir, preexec_fn=os.setpgrp,
+                           stdin=devnull, stdout=devnull, stderr=devnull);
+    self.wait_process_group(process.pid, float(self.args.timeout))
+    sancov_regex = self.args.sancov_regex.replace('%pid', str(process.pid))
+    testcase_coverage = Coverage(work_dir, sancov_regex)
     shutil.rmtree(work_dir)
     return testcase_coverage
 
   def process_testcase(self, testcase_path):
     testcase_coverage = self.get_testcase_coverage(testcase_path)
     if self.total_coverage.merge(testcase_coverage):
+      filename = os.path.basename(testcase_path)
       testcase_save_path = os.path.join(self.corpus_dir, filename)
       shutil.copyfile(testcase_path, testcase_save_path)
 
@@ -135,6 +184,7 @@ class Accd:
     testcases_dir = self.args.testcases_dir
     if not os.path.isdir(testcases_dir):
       raise AccdFailedException('Directory ' + testcases_dir + ' does not exist.')
+    testcases_dir = os.path.abspath(testcases_dir)
     for filename in os.listdir(testcases_dir):
       self.process_testcase(os.path.join(testcases_dir, filename))
 
