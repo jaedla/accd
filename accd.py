@@ -83,7 +83,7 @@ class Coverage:
 
 class Accd:
   def __init__(self):
-    self.devnull = open(os.devnull, "rwb")
+    self.devnull = open(os.devnull, "r+b")
 
   def parse_args(self):
     description        =  'Coverage tool based on ASAN coverage.'
