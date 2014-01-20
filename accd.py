@@ -107,12 +107,12 @@ class Accd:
     parser.add_argument('corpus_dir', help=corpus_dir_help)
     parser.add_argument('testcases_dir', help=testcases_dir_help)
     parser.add_argument('command', help=command_help, nargs=argparse.REMAINDER)
-    parser.add_argument('--timeout', dest='timeout', default=None, help=timeout_help)
+    parser.add_argument('--timeout', type=float, dest='timeout', default=None, help=timeout_help)
     parser.add_argument('--sancov-regex', dest='sancov_regex', default='.*\.sancov',
                         help=sancov_regex_help)
     parser.add_argument('--print-new-coverage', dest='print_new_coverage', default=False,
                         action='store_true', help=print_new_coverage_help)
-    parser.add_argument('--num-jobs', dest='num_jobs', default=psutil.NUM_CPUS, help=num_jobs_help)
+    parser.add_argument('--num-jobs', type=int, dest='num_jobs', default=psutil.NUM_CPUS, help=num_jobs_help)
     parser.add_argument('--hide-gui', dest='hide_gui', default=False, action='store_true',
                         help=hide_gui_help)
     self.parser = parser
@@ -191,7 +191,7 @@ class Accd:
       arg = arg.replace('%work_dir', work_dir)
       command.append(arg)
     process = self.run_program(command, work_dir, os.setpgrp)
-    self.wait_process_group(process, float(self.args.timeout))
+    self.wait_process_group(process, self.args.timeout)
     sancov_regex = self.args.sancov_regex.replace('%pid', str(process.pid))
     testcase_coverage = Coverage(work_dir, sancov_regex)
     shutil.rmtree(work_dir)
@@ -220,6 +220,9 @@ class Accd:
     testcases_dir = self.args.testcases_dir
     if not os.path.isdir(testcases_dir):
       raise AccdFailedException('Directory ' + testcases_dir + ' does not exist.')
+    command = self.args.command[0]
+    if command.startswith('.'):
+      self.args.command[0] = os.path.abspath(command)
     self.testcases_dir = os.path.abspath(testcases_dir)
     self.testcases = os.listdir(self.testcases_dir)
     self.testcase_count = len(self.testcases)
@@ -227,7 +230,7 @@ class Accd:
     self.testcases_lock = threading.Lock()
     self.coverage_lock = threading.Lock()
     self.print_lock = threading.Lock()
-    for i in xrange(int(self.args.num_jobs)):
+    for i in xrange(self.args.num_jobs):
       thread = threading.Thread(target=self.testcase_processor_thread, args=(i, ))
       thread.setDaemon(True)
       thread.start()
